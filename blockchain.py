@@ -254,13 +254,22 @@ class Block:
         b.hash = d["hash"]
         return b
 
+# ==========================================
+# BLOCKCHAIN CLASS (UPDATED FOR STORAGE)
+# ==========================================
+
 class Blockchain:
-    def __init__(self):
-        self.chain = [self.create_genesis_block()]
-        self.time_simulator = 1000 
+    def __init__(self, storage_file="blockchain.dat"):
+        self.storage_file = storage_file
         self.difficulty = 3
+        self.time_simulator = 1000 
         self.pending_transactions = []
         self.mining_reward = 100
+
+        # Attempt to load from disk, otherwise start fresh
+        if not self.load_from_disk():
+            self.chain = [self.create_genesis_block()]
+            self.save_to_disk()
 
     def create_genesis_block(self):
         return Block(0, 0, [], "0" * 64)
@@ -296,6 +305,7 @@ class Blockchain:
         
         self.chain.append(new_block)
         self.pending_transactions = []
+        self.save_to_disk() # <--- SAVE TO DISK AFTER MINING
 
     def to_dict(self):
         return {
@@ -305,101 +315,42 @@ class Blockchain:
         }
 
     def replace_chain(self, chain_data):
-        """Replaces local chain if the downloaded network chain is longer."""
         new_chain = [Block.from_dict(b) for b in chain_data["chain"]]
         if len(new_chain) > len(self.chain):
             self.chain = new_chain
             self.difficulty = chain_data["difficulty"]
             self.time_simulator = chain_data["time_simulator"]
+            self.save_to_disk() # <--- SAVE TO DISK AFTER SYNCING
             return True
         return False
 
-# ==========================================
-# P2P NETWORK NODE CLASS
-# ==========================================
-
-class Node:
-    def __init__(self, host, port, blockchain, wallet):
-        self.host = host
-        self.port = port
-        self.blockchain = blockchain
-        self.wallet = wallet
-
-    def send_message(self, peer_port, message):
-        """Sends data to a peer and waits for a response."""
+    def save_to_disk(self):
+        """Saves the blockchain state to a local text file."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((self.host, peer_port))
-            # Send message and signal we are done writing
-            s.sendall(message.encode('utf-8'))
-            s.shutdown(socket.SHUT_WR) 
-            
-            # Read the peer's reply
-            data = b""
-            while True:
-                packet = s.recv(4096)
-                if not packet: break
-                data += packet
-            s.close()
-            return data.decode('utf-8')
+            with open(self.storage_file, "w") as f:
+                f.write(str(self.to_dict()))
         except Exception as e:
-            return None
+            print(f"❌ Failed to save chain to disk: {e}")
 
-    def handle_client(self, conn):
-        """Processes incoming messages from other nodes."""
-        data = b""
-        while True:
-            packet = conn.recv(4096)
-            if not packet: break
-            data += packet
-            
-        message = data.decode('utf-8')
-        if not message: return
-        
-        parts = message.split("|", 1)
-        command = parts[0]
-        
-        if command == "GET_CHAIN":
-            # Peer wants our blockchain
-            reply = "CHAIN_REPLY|" + str(self.blockchain.to_dict())
-            conn.sendall(reply.encode('utf-8'))
-            
-        elif command == "NEW_TX":
-            # Peer sent us a transaction. Validate and mine it!
-            tx_dict = eval(parts[1])
-            tx = Transaction.from_dict(tx_dict)
-            success = self.blockchain.add_transaction(tx)
-            
-            if success:
-                print(f"\n[NETWORK] Received P2P Transaction: {tx.amount} coins.")
-                print("[NETWORK] Mining new block to confirm transaction...")
-                self.blockchain.mine_pending_transactions(self.wallet.public_key)
-                print(f"[NETWORK] Block mined! My Balance: {self.blockchain.get_balance_of_address(self.wallet.public_key)}")
-                print(f"Node listening on port {self.port}...\n")
-                
-            conn.sendall(b"TX_RECEIVED")
-
-    def start_listening(self):
-        """Starts the server loop to listen for incoming P2P connections."""
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
-        server.bind((self.host, self.port))
-        server.listen(5)
-        # Timeout allows the node to do other things while listening
-        server.settimeout(1.0) 
-        
-        print(f"Node listening on port {self.port}...\n")
+    def load_from_disk(self):
+        """Loads the blockchain state from a local text file if it exists."""
         try:
-            while True:
-                try:
-                    conn, addr = server.accept()
-                    self.handle_client(conn)
-                    conn.close()
-                except socket.timeout:
-                    pass
-        except KeyboardInterrupt:
-            print("\nNode shutting down.")
-            server.close()
+            with open(self.storage_file, "r") as f:
+                data_str = f.read()
+                if not data_str: return False
+                chain_data = eval(data_str)
+                
+                self.chain = [Block.from_dict(b) for b in chain_data["chain"]]
+                self.difficulty = chain_data["difficulty"]
+                self.time_simulator = chain_data["time_simulator"]
+                print(f"📦 Loaded existing blockchain from {self.storage_file} (Length: {len(self.chain)} blocks)")
+                return True
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"❌ Failed to load chain from disk: {e}")
+            return False
+
 
 # ==========================================
 # VERIFICATION / P2P MULTI-TERMINAL TEST
@@ -407,44 +358,45 @@ class Node:
 
 if __name__ == "__main__":
     print("=========================================")
-    print("       P2P DECENTRALIZED NETWORK         ")
+    print("       PERSISTENT P2P NETWORK            ")
     print("=========================================")
-    print("HOW TO TEST:")
-    print(" 1. Open TWO separate Terminal windows.")
-    print(" 2. Run this script in both windows.")
-    print(" 3. In Window 1, select Node A.")
-    print(" 4. In Window 2, select Node B.")
+    print(" 1. Run Node A. It will mine initial coins and save to disk.")
+    print(" 2. Stop Node A (Ctrl+C).")
+    print(" 3. Run Node A again! It will load from disk and remember the balances!")
     print("=========================================\n")
     
     choice = input("Start as Node (1 for Node A, 2 for Node B): ")
     
-    print("Generating cryptography keys...")
+    print("Generating deterministic cryptography keys...")
     alice = Wallet("Alice")
     bob = Wallet("Bob")
     
     if choice == "1":
         print("\n--- STARTING NODE A (MINER ON PORT 5000) ---")
-        my_coin = Blockchain()
+        my_coin = Blockchain("chain_A.dat") # Specific file for Node A
         
-        print("Pre-mining blocks to generate coins...")
-        my_coin.mine_pending_transactions(alice.public_key)
-        
-        # Node A sends 50 coins to Bob so Bob has money to test with
-        tx = Transaction(alice.public_key, bob.public_key, 50)
-        tx.sign_transaction(alice.private_key)
-        my_coin.add_transaction(tx)
-        my_coin.mine_pending_transactions(alice.public_key)
-        
+        # Only pre-mine if this is a brand new chain
+        if len(my_coin.chain) == 1:
+            print("New chain detected. Pre-mining blocks to generate coins...")
+            my_coin.mine_pending_transactions(alice.public_key)
+            
+            tx = Transaction(alice.public_key, bob.public_key, 50)
+            tx.sign_transaction(alice.private_key)
+            my_coin.add_transaction(tx)
+            my_coin.mine_pending_transactions(alice.public_key)
+        else:
+            print("Resuming network from saved state...")
+            
         print(f"Initialization complete.")
-        print(f"Node A Balance: {my_coin.get_balance_of_address(alice.public_key)}")
-        print(f"Node B Balance: {my_coin.get_balance_of_address(bob.public_key)}\n")
+        print(f"Node A (Alice) Balance: {my_coin.get_balance_of_address(alice.public_key)}")
+        print(f"Node B (Bob) Balance: {my_coin.get_balance_of_address(bob.public_key)}\n")
         
         node = Node('127.0.0.1', 5000, my_coin, alice)
         node.start_listening()
         
     elif choice == "2":
         print("\n--- STARTING NODE B (PEER ON PORT 5001) ---")
-        my_coin = Blockchain() # Starts with empty genesis chain
+        my_coin = Blockchain("chain_B.dat") # Specific file for Node B
         node = Node('127.0.0.1', 5001, my_coin, bob)
         
         print("Connecting to Node A (Port 5000) to sync blockchain...")
@@ -453,9 +405,9 @@ if __name__ == "__main__":
         if reply and reply.startswith("CHAIN_REPLY|"):
             chain_dict = eval(reply.split("|", 1)[1])
             my_coin.replace_chain(chain_dict)
-            print("Chain downloaded and synced successfully!")
+            print("Chain downloaded, synced, and saved to disk successfully!")
         else:
-            print("❌ Failed to sync chain. Make sure Node A is running in the other terminal first!")
+            print("❌ Failed to sync chain. Make sure Node A is running first!")
             exit()
             
         balance = my_coin.get_balance_of_address(bob.public_key)
@@ -469,7 +421,7 @@ if __name__ == "__main__":
         node.send_message(5000, "NEW_TX|" + str(tx.to_dict()))
         
         print("Waiting 3 seconds for Node A to mine our transaction...")
-        for _ in range(15000000): pass # Pure Python delay without importing `time`
+        for _ in range(15000000): pass 
         
         print("Syncing updated chain from Node A...")
         reply = node.send_message(5000, "GET_CHAIN|")
@@ -479,6 +431,5 @@ if __name__ == "__main__":
             
         new_balance = my_coin.get_balance_of_address(bob.public_key)
         print(f"\nNode B Final Balance: {new_balance} coins")
-        print("\nP2P TEST COMPLETE! You have built a real, working Python blockchain.")
     else:
         print("Invalid choice.")
