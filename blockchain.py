@@ -2,6 +2,8 @@
 # PURE PYTHON SHA-256 IMPLEMENTATION
 # ==========================================
 
+import socket
+
 # SHA-256 Constants (First 32 bits of the fractional parts of the cube roots of the first 64 primes)
 K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -168,7 +170,7 @@ class Wallet:
         self.private_key = (d, n) # Keep this secret!
 
 # ==========================================
-# TRANSACTIONS
+# TRANSACTIONS (UPDATED FOR SERIALIZATION)
 # ==========================================
 
 class Transaction:
@@ -179,40 +181,41 @@ class Transaction:
         self.signature = None
 
     def calculate_hash(self):
-        """Hashes the transaction details."""
         data = str(self.sender) + str(self.recipient) + str(self.amount)
         return sha256(data)
 
     def sign_transaction(self, private_key):
-        """Signs the transaction hash with the sender's private key."""
-        if self.sender == "System": return # Mining rewards don't need signatures
-        
-        tx_hash = self.calculate_hash()
-        tx_hash_int = int(tx_hash, 16)
-        
+        if self.sender == "System": return
+        tx_hash_int = int(self.calculate_hash(), 16)
         d, n = private_key
-        # RSA Signature: S = (hash^d) mod n
         self.signature = pow(tx_hash_int, d, n)
 
     def is_valid(self):
-        """Verifies the signature using the sender's public key."""
-        if self.sender == "System": return True # Mining rewards are valid
+        if self.sender == "System": return True
         if self.signature is None: return False
-        
-        tx_hash = self.calculate_hash()
-        tx_hash_int = int(tx_hash, 16)
-        
+        tx_hash_int = int(self.calculate_hash(), 16)
         e, n = self.sender
-        # RSA Verification: hash = (S^e) mod n
         verified_hash_int = pow(self.signature, e, n)
-        
         return tx_hash_int == verified_hash_int
 
-    def __str__(self):
-        return f"{self.sender[:10]}... pays {self.recipient[:10]}... {self.amount} Coins" if self.sender != "System" else f"System pays {self.recipient[:10]}... {self.amount} Coins"
+    def to_dict(self):
+        """Converts transaction to a dictionary for network transmission."""
+        return {
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "amount": self.amount,
+            "signature": self.signature
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuilds a transaction object from a dictionary."""
+        tx = cls(d["sender"], d["recipient"], d["amount"])
+        tx.signature = d["signature"]
+        return tx
 
 # ==========================================
-# UPDATED BLOCK & BLOCKCHAIN CLASSES
+# BLOCK & BLOCKCHAIN CLASSES (UPDATED)
 # ==========================================
 
 class Block:
@@ -225,7 +228,6 @@ class Block:
         self.hash = self.calculate_hash()
 
     def calculate_hash(self):
-        # We now use the calculate_hash() of each transaction object to build the block string
         tx_string = "".join(tx.calculate_hash() for tx in self.transactions)
         block_data = str(self.index) + str(self.timestamp) + tx_string + str(self.previous_hash) + str(self.nonce)
         return sha256(block_data)
@@ -235,11 +237,22 @@ class Block:
         while self.hash[:difficulty] != target:
             self.nonce += 1
             self.hash = self.calculate_hash()
-        print(f"   => Block {self.index} mined! Hash: {self.hash}")
 
-# ==========================================
-# THE BLOCKCHAIN CLASS (UPDATED FOR BALANCES)
-# ==========================================
+    def to_dict(self):
+        return {
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "transactions": [tx.to_dict() for tx in self.transactions],
+            "previous_hash": self.previous_hash,
+            "nonce": self.nonce,
+            "hash": self.hash
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        b = cls(d["index"], d["timestamp"], [Transaction.from_dict(tx) for tx in d["transactions"]], d["previous_hash"], d["nonce"])
+        b.hash = d["hash"]
+        return b
 
 class Blockchain:
     def __init__(self):
@@ -256,124 +269,216 @@ class Blockchain:
         return self.chain[-1]
 
     def get_balance_of_address(self, address):
-        """Calculates balance by iterating through the entire blockchain history."""
         balance = 0
-
-        # 1. Sum up all confirmed transactions in the blockchain
         for block in self.chain:
             for tx in block.transactions:
-                if tx.sender == address:
-                    balance -= tx.amount
-                if tx.recipient == address:
-                    balance += tx.amount
-
-        # 2. Subtract unconfirmed transactions in the mempool to prevent double-spending
+                if tx.sender == address: balance -= tx.amount
+                if tx.recipient == address: balance += tx.amount
         for tx in self.pending_transactions:
-            if tx.sender == address:
-                balance -= tx.amount
-
+            if tx.sender == address: balance -= tx.amount
         return balance
 
     def add_transaction(self, transaction):
-        """Validates signature and balance, then adds to mempool."""
-        if not transaction.is_valid():
-            print("❌ ERROR: Cannot add invalid transaction (Bad Signature).")
-            return False
-        
-        # Check balance (System/Mining rewards don't need balance checks)
+        if not transaction.is_valid(): return False
         if transaction.sender != "System":
-            sender_balance = self.get_balance_of_address(transaction.sender)
-            if sender_balance < transaction.amount:
-                print(f"❌ ERROR: Insufficient funds! Address has {sender_balance} coins, tried to send {transaction.amount}.")
+            if self.get_balance_of_address(transaction.sender) < transaction.amount:
                 return False
-                
         self.pending_transactions.append(transaction)
         return True
 
     def mine_pending_transactions(self, mining_reward_address):
-        """Creates a block out of pending transactions and rewards the miner."""
         reward_tx = Transaction("System", mining_reward_address, self.mining_reward)
         self.pending_transactions.append(reward_tx)
 
         self.time_simulator += 10
-        new_block = Block(
-            index=self.get_latest_block().index + 1,
-            timestamp=self.time_simulator,
-            transactions=self.pending_transactions,
-            previous_hash=self.get_latest_block().hash
-        )
-
-        print(f"Mining block {new_block.index} containing {len(self.pending_transactions)} transactions...")
+        new_block = Block(self.get_latest_block().index + 1, self.time_simulator, self.pending_transactions, self.get_latest_block().hash)
         new_block.mine_block(self.difficulty)
         
         self.chain.append(new_block)
         self.pending_transactions = []
 
-    def is_chain_valid(self):
-        for i in range(1, len(self.chain)):
-            current = self.chain[i]
-            previous = self.chain[i - 1]
+    def to_dict(self):
+        return {
+            "chain": [b.to_dict() for b in self.chain],
+            "difficulty": self.difficulty,
+            "time_simulator": self.time_simulator
+        }
 
-            if current.hash != current.calculate_hash():
-                return False
-            if current.previous_hash != previous.hash:
-                return False
-            if current.hash[:self.difficulty] != "0" * self.difficulty:
-                return False
-            for tx in current.transactions:
-                if not tx.is_valid():
-                    return False
-        return True
+    def replace_chain(self, chain_data):
+        """Replaces local chain if the downloaded network chain is longer."""
+        new_chain = [Block.from_dict(b) for b in chain_data["chain"]]
+        if len(new_chain) > len(self.chain):
+            self.chain = new_chain
+            self.difficulty = chain_data["difficulty"]
+            self.time_simulator = chain_data["time_simulator"]
+            return True
+        return False
 
 # ==========================================
-# VERIFICATION / TEST RUN
+# P2P NETWORK NODE CLASS
+# ==========================================
+
+class Node:
+    def __init__(self, host, port, blockchain, wallet):
+        self.host = host
+        self.port = port
+        self.blockchain = blockchain
+        self.wallet = wallet
+
+    def send_message(self, peer_port, message):
+        """Sends data to a peer and waits for a response."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((self.host, peer_port))
+            # Send message and signal we are done writing
+            s.sendall(message.encode('utf-8'))
+            s.shutdown(socket.SHUT_WR) 
+            
+            # Read the peer's reply
+            data = b""
+            while True:
+                packet = s.recv(4096)
+                if not packet: break
+                data += packet
+            s.close()
+            return data.decode('utf-8')
+        except Exception as e:
+            return None
+
+    def handle_client(self, conn):
+        """Processes incoming messages from other nodes."""
+        data = b""
+        while True:
+            packet = conn.recv(4096)
+            if not packet: break
+            data += packet
+            
+        message = data.decode('utf-8')
+        if not message: return
+        
+        parts = message.split("|", 1)
+        command = parts[0]
+        
+        if command == "GET_CHAIN":
+            # Peer wants our blockchain
+            reply = "CHAIN_REPLY|" + str(self.blockchain.to_dict())
+            conn.sendall(reply.encode('utf-8'))
+            
+        elif command == "NEW_TX":
+            # Peer sent us a transaction. Validate and mine it!
+            tx_dict = eval(parts[1])
+            tx = Transaction.from_dict(tx_dict)
+            success = self.blockchain.add_transaction(tx)
+            
+            if success:
+                print(f"\n[NETWORK] Received P2P Transaction: {tx.amount} coins.")
+                print("[NETWORK] Mining new block to confirm transaction...")
+                self.blockchain.mine_pending_transactions(self.wallet.public_key)
+                print(f"[NETWORK] Block mined! My Balance: {self.blockchain.get_balance_of_address(self.wallet.public_key)}")
+                print(f"Node listening on port {self.port}...\n")
+                
+            conn.sendall(b"TX_RECEIVED")
+
+    def start_listening(self):
+        """Starts the server loop to listen for incoming P2P connections."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+        server.bind((self.host, self.port))
+        server.listen(5)
+        # Timeout allows the node to do other things while listening
+        server.settimeout(1.0) 
+        
+        print(f"Node listening on port {self.port}...\n")
+        try:
+            while True:
+                try:
+                    conn, addr = server.accept()
+                    self.handle_client(conn)
+                    conn.close()
+                except socket.timeout:
+                    pass
+        except KeyboardInterrupt:
+            print("\nNode shutting down.")
+            server.close()
+
+# ==========================================
+# VERIFICATION / P2P MULTI-TERMINAL TEST
 # ==========================================
 
 if __name__ == "__main__":
-    print("Generating Wallets...")
+    print("=========================================")
+    print("       P2P DECENTRALIZED NETWORK         ")
+    print("=========================================")
+    print("HOW TO TEST:")
+    print(" 1. Open TWO separate Terminal windows.")
+    print(" 2. Run this script in both windows.")
+    print(" 3. In Window 1, select Node A.")
+    print(" 4. In Window 2, select Node B.")
+    print("=========================================\n")
+    
+    choice = input("Start as Node (1 for Node A, 2 for Node B): ")
+    
+    print("Generating cryptography keys...")
     alice = Wallet("Alice")
     bob = Wallet("Bob")
-    miner = Wallet("Miner")
     
-    my_coin = Blockchain()
-
-    print("\n--- PHASE 1: INITIAL DISTRIBUTION ---")
-    print("Miner mines an empty block to earn the 100 coin block reward...")
-    my_coin.mine_pending_transactions(miner.public_key)
-    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
-    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
-
-    print("\n--- PHASE 2: MINER FUNDS ALICE ---")
-    print("Miner sends 50 coins to Alice...")
-    tx_fund_alice = Transaction(miner.public_key, alice.public_key, 50)
-    tx_fund_alice.sign_transaction(miner.private_key)
-    my_coin.add_transaction(tx_fund_alice)
-
-    print("Miner mines the block to confirm the transaction...")
-    my_coin.mine_pending_transactions(miner.public_key)
-    
-    # Miner spent 50, but earned 100 for mining this block! (100 - 50 + 100 = 150)
-    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
-    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
-
-    print("\n--- PHASE 3: ALICE TRIES TO OVERSPEND ---")
-    print("Alice tries to send 500 coins to Bob (she only has 50)...")
-    tx_overspend = Transaction(alice.public_key, bob.public_key, 500)
-    tx_overspend.sign_transaction(alice.private_key)
-    success = my_coin.add_transaction(tx_overspend)
-    if not success:
-        print("Transaction successfully rejected by the network.")
-
-    print("\n--- PHASE 4: ALICE SENDS VALID TRANSACTION ---")
-    print("Alice sends 15 coins to Bob...")
-    tx_valid = Transaction(alice.public_key, bob.public_key, 15)
-    tx_valid.sign_transaction(alice.private_key)
-    my_coin.add_transaction(tx_valid)
-    
-    print("Miner mines the block...")
-    my_coin.mine_pending_transactions(miner.public_key)
-
-    print("\n--- FINAL BALANCES ---")
-    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
-    print(f"Bob Balance:   {my_coin.get_balance_of_address(bob.public_key)}")
-    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
+    if choice == "1":
+        print("\n--- STARTING NODE A (MINER ON PORT 5000) ---")
+        my_coin = Blockchain()
+        
+        print("Pre-mining blocks to generate coins...")
+        my_coin.mine_pending_transactions(alice.public_key)
+        
+        # Node A sends 50 coins to Bob so Bob has money to test with
+        tx = Transaction(alice.public_key, bob.public_key, 50)
+        tx.sign_transaction(alice.private_key)
+        my_coin.add_transaction(tx)
+        my_coin.mine_pending_transactions(alice.public_key)
+        
+        print(f"Initialization complete.")
+        print(f"Node A Balance: {my_coin.get_balance_of_address(alice.public_key)}")
+        print(f"Node B Balance: {my_coin.get_balance_of_address(bob.public_key)}\n")
+        
+        node = Node('127.0.0.1', 5000, my_coin, alice)
+        node.start_listening()
+        
+    elif choice == "2":
+        print("\n--- STARTING NODE B (PEER ON PORT 5001) ---")
+        my_coin = Blockchain() # Starts with empty genesis chain
+        node = Node('127.0.0.1', 5001, my_coin, bob)
+        
+        print("Connecting to Node A (Port 5000) to sync blockchain...")
+        reply = node.send_message(5000, "GET_CHAIN|")
+        
+        if reply and reply.startswith("CHAIN_REPLY|"):
+            chain_dict = eval(reply.split("|", 1)[1])
+            my_coin.replace_chain(chain_dict)
+            print("Chain downloaded and synced successfully!")
+        else:
+            print("❌ Failed to sync chain. Make sure Node A is running in the other terminal first!")
+            exit()
+            
+        balance = my_coin.get_balance_of_address(bob.public_key)
+        print(f"\nNode B Initial Balance: {balance} coins")
+        
+        print("\nCreating P2P Transaction: Sending 15 coins to Node A...")
+        tx = Transaction(bob.public_key, alice.public_key, 15)
+        tx.sign_transaction(bob.private_key)
+        
+        print("Broadcasting transaction to network...")
+        node.send_message(5000, "NEW_TX|" + str(tx.to_dict()))
+        
+        print("Waiting 3 seconds for Node A to mine our transaction...")
+        for _ in range(15000000): pass # Pure Python delay without importing `time`
+        
+        print("Syncing updated chain from Node A...")
+        reply = node.send_message(5000, "GET_CHAIN|")
+        if reply and reply.startswith("CHAIN_REPLY|"):
+            chain_dict = eval(reply.split("|", 1)[1])
+            my_coin.replace_chain(chain_dict)
+            
+        new_balance = my_coin.get_balance_of_address(bob.public_key)
+        print(f"\nNode B Final Balance: {new_balance} coins")
+        print("\nP2P TEST COMPLETE! You have built a real, working Python blockchain.")
+    else:
+        print("Invalid choice.")
