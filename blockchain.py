@@ -237,6 +237,10 @@ class Block:
             self.hash = self.calculate_hash()
         print(f"   => Block {self.index} mined! Hash: {self.hash}")
 
+# ==========================================
+# THE BLOCKCHAIN CLASS (UPDATED FOR BALANCES)
+# ==========================================
+
 class Blockchain:
     def __init__(self):
         self.chain = [self.create_genesis_block()]
@@ -251,19 +255,46 @@ class Blockchain:
     def get_latest_block(self):
         return self.chain[-1]
 
+    def get_balance_of_address(self, address):
+        """Calculates balance by iterating through the entire blockchain history."""
+        balance = 0
+
+        # 1. Sum up all confirmed transactions in the blockchain
+        for block in self.chain:
+            for tx in block.transactions:
+                if tx.sender == address:
+                    balance -= tx.amount
+                if tx.recipient == address:
+                    balance += tx.amount
+
+        # 2. Subtract unconfirmed transactions in the mempool to prevent double-spending
+        for tx in self.pending_transactions:
+            if tx.sender == address:
+                balance -= tx.amount
+
+        return balance
+
     def add_transaction(self, transaction):
-        """Validates and adds a transaction to the mempool."""
+        """Validates signature and balance, then adds to mempool."""
         if not transaction.is_valid():
-            raise Exception("Cannot add invalid transaction to chain")
+            print("❌ ERROR: Cannot add invalid transaction (Bad Signature).")
+            return False
+        
+        # Check balance (System/Mining rewards don't need balance checks)
+        if transaction.sender != "System":
+            sender_balance = self.get_balance_of_address(transaction.sender)
+            if sender_balance < transaction.amount:
+                print(f"❌ ERROR: Insufficient funds! Address has {sender_balance} coins, tried to send {transaction.amount}.")
+                return False
+                
         self.pending_transactions.append(transaction)
+        return True
 
     def mine_pending_transactions(self, mining_reward_address):
         """Creates a block out of pending transactions and rewards the miner."""
-        # 1. Create the reward transaction for the miner
         reward_tx = Transaction("System", mining_reward_address, self.mining_reward)
         self.pending_transactions.append(reward_tx)
 
-        # 2. Package pending transactions into a new block
         self.time_simulator += 10
         new_block = Block(
             index=self.get_latest_block().index + 1,
@@ -272,11 +303,9 @@ class Blockchain:
             previous_hash=self.get_latest_block().hash
         )
 
-        # 3. Mine the block
         print(f"Mining block {new_block.index} containing {len(self.pending_transactions)} transactions...")
         new_block.mine_block(self.difficulty)
         
-        # 4. Append to chain and clear mempool
         self.chain.append(new_block)
         self.pending_transactions = []
 
@@ -286,19 +315,13 @@ class Blockchain:
             previous = self.chain[i - 1]
 
             if current.hash != current.calculate_hash():
-                print(f"❌ TAMPER DETECTED: Block {current.index} hash is invalid.")
                 return False
             if current.previous_hash != previous.hash:
-                print(f"❌ BROKEN LINK: Block {current.index} previous_hash mismatch.")
                 return False
             if current.hash[:self.difficulty] != "0" * self.difficulty:
-                print(f"❌ INVALID POW: Block {current.index} did not meet difficulty.")
                 return False
-                
-            # Verify all transactions inside the block
             for tx in current.transactions:
                 if not tx.is_valid():
-                    print(f"❌ INVALID TX: Block {current.index} contains an invalid signature.")
                     return False
         return True
 
@@ -307,91 +330,50 @@ class Blockchain:
 # ==========================================
 
 if __name__ == "__main__":
-    print("Generating Wallets (Mining primes, this may take a few seconds)...")
-    alice = Wallet("Alice_Secret_Seed")
-    bob = Wallet("Bob_Secret_Seed")
-    miner = Wallet("Miner_Secret_Seed")
-    print("Wallets generated successfully!\n")
-
+    print("Generating Wallets...")
+    alice = Wallet("Alice")
+    bob = Wallet("Bob")
+    miner = Wallet("Miner")
+    
     my_coin = Blockchain()
 
-    print("Alice creates a transaction to send 10 coins to Bob...")
-    tx1 = Transaction(alice.public_key, bob.public_key, 10)
-    tx1.sign_transaction(alice.private_key)
-    my_coin.add_transaction(tx1)
+    print("\n--- PHASE 1: INITIAL DISTRIBUTION ---")
+    print("Miner mines an empty block to earn the 100 coin block reward...")
+    my_coin.mine_pending_transactions(miner.public_key)
+    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
+    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
 
-    print("Bob creates a transaction to send 5 coins back to Alice...")
-    tx2 = Transaction(bob.public_key, alice.public_key, 5)
-    tx2.sign_transaction(bob.private_key)
-    my_coin.add_transaction(tx2)
+    print("\n--- PHASE 2: MINER FUNDS ALICE ---")
+    print("Miner sends 50 coins to Alice...")
+    tx_fund_alice = Transaction(miner.public_key, alice.public_key, 50)
+    tx_fund_alice.sign_transaction(miner.private_key)
+    my_coin.add_transaction(tx_fund_alice)
 
-    print("\nMiner is mining the pending transactions...")
+    print("Miner mines the block to confirm the transaction...")
+    my_coin.mine_pending_transactions(miner.public_key)
+    
+    # Miner spent 50, but earned 100 for mining this block! (100 - 50 + 100 = 150)
+    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
+    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
+
+    print("\n--- PHASE 3: ALICE TRIES TO OVERSPEND ---")
+    print("Alice tries to send 500 coins to Bob (she only has 50)...")
+    tx_overspend = Transaction(alice.public_key, bob.public_key, 500)
+    tx_overspend.sign_transaction(alice.private_key)
+    success = my_coin.add_transaction(tx_overspend)
+    if not success:
+        print("Transaction successfully rejected by the network.")
+
+    print("\n--- PHASE 4: ALICE SENDS VALID TRANSACTION ---")
+    print("Alice sends 15 coins to Bob...")
+    tx_valid = Transaction(alice.public_key, bob.public_key, 15)
+    tx_valid.sign_transaction(alice.private_key)
+    my_coin.add_transaction(tx_valid)
+    
+    print("Miner mines the block...")
     my_coin.mine_pending_transactions(miner.public_key)
 
-    print("\nValidating chain integrity...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-
-    print("\n--- INITIATING HACKING ATTEMPT ---")
-    print("Hacker intercepts transaction and modifies the recipient to themselves...")
-    
-    hacker = Wallet("Hacker_Secret_Seed")
-    # Hacker modifies Alice's transaction in the block (changing recipient)
-    hacked_tx = my_coin.chain[1].transactions[0]
-    hacked_tx.recipient = hacker.public_key
-    
-    # Notice the hacker CANNOT re-sign the transaction because they don't have Alice's private key!
-    print("Validating chain integrity after hacker tampers with transaction recipient...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-    print("Initializing Blockchain...")
-    my_coin = Blockchain()
-
-    print("\nAdding blocks to the network...")
-    my_coin.add_new_block(["tx1: Alice pays Bob 10 BTC"])
-    my_coin.add_new_block(["tx2: Bob pays Charlie 5 BTC"])
-
-    print("\nValidating chain integrity...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-
-    print("\n--- INITIATING HACKING ATTEMPT ---")
-    print("Attacker changes Bob's transaction and manually recalculates the hash (without mining)...")
-    
-    # Attacker alters data
-    my_coin.chain[1].transactions = ["tx1: Alice pays EVE 100 BTC"]
-    # Attacker tries to hide it by just calling calculate_hash() 
-    # instead of performing Proof of Work
-    my_coin.chain[1].hash = my_coin.chain[1].calculate_hash()
-    
-    print("\nValidating chain integrity after attacker skips PoW...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-    print("Initializing Blockchain...")
-    my_coin = Blockchain()
-
-    print("Adding blocks...")
-    my_coin.add_new_block(["tx1: Alice pays Bob 10 BTC"])
-    my_coin.add_new_block(["tx2: Bob pays Charlie 5 BTC"])
-    my_coin.add_new_block(["tx3: Charlie pays Dave 2 BTC"])
-
-    print("\nValidating chain integrity...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-
-    print("\n--- INITIATING HACKING ATTEMPT ---")
-    print("Attacker changes Bob's transaction to steal BTC...")
-    # Attacker alters the data in Block 1
-    my_coin.chain[1].transactions = ["tx1: Alice pays EVE 100 BTC"]
-    
-    print("Validating chain integrity after data tamper...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
-
-    print("\nAttacker realizes error, recalculates hash for Block 1 to hide the tamper...")
-    # Attacker tries to hide their tracks by updating the hash
-    my_coin.chain[1].hash = my_coin.chain[1].calculate_hash()
-    
-    print("Validating chain integrity after hash recalculation...")
-    is_valid = my_coin.is_chain_valid()
-    print(f"Is chain valid? {'✅ YES' if is_valid else '❌ NO'}")
+    print("\n--- FINAL BALANCES ---")
+    print(f"Alice Balance: {my_coin.get_balance_of_address(alice.public_key)}")
+    print(f"Bob Balance:   {my_coin.get_balance_of_address(bob.public_key)}")
+    print(f"Miner Balance: {my_coin.get_balance_of_address(miner.public_key)}")
